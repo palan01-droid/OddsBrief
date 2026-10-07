@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import time
 from datetime import datetime
@@ -9,6 +10,13 @@ DB = "oddsbrief.db"
 TOP_N = 500
 BIG_BET = 5000
 
+# locally settings come from .env, on a host they're already set as environment variables
+if os.path.exists(".env"):
+    for line in open(".env"):
+        if "=" in line:
+            k, v = line.strip().split("=", 1)
+            os.environ.setdefault(k, v)
+
 db = sqlite3.connect(DB, check_same_thread=False)
 db.executescript("""
 CREATE TABLE IF NOT EXISTS markets (
@@ -17,6 +25,15 @@ CREATE TABLE IF NOT EXISTS markets (
 );
 CREATE TABLE IF NOT EXISTS trades (
     trade_id TEXT PRIMARY KEY, ticker TEXT, title TEXT, time TEXT, side TEXT, price REAL, dollars REAL
+);
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY, username TEXT UNIQUE COLLATE NOCASE, password_hash TEXT, created TEXT
+);
+CREATE TABLE IF NOT EXISTS likes (
+    user_id INTEGER, ticker TEXT, PRIMARY KEY (user_id, ticker)
+);
+CREATE TABLE IF NOT EXISTS comments (
+    id INTEGER PRIMARY KEY, user_id INTEGER, ticker TEXT, text TEXT, time TEXT
 );
 """)
 
@@ -151,6 +168,7 @@ def scan():
             "price": price_of(m),
             "prev": float(m["previous_price_dollars"] or 0),
             "volume": float(m["volume_24h_fp"] or 0),
+            "rules": " ".join(filter(None, [m.get("rules_primary"), m.get("rules_secondary")])),
         })
     db.commit()
     return markets

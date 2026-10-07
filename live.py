@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import os
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -18,13 +19,16 @@ prices = {}
 
 
 def auth_headers():
-    env = dict(line.strip().split("=", 1) for line in open(".env") if "=" in line)
-    with open(env["KALSHI_KEY_PATH"], "rb") as f:
-        key = serialization.load_pem_private_key(f.read(), password=None)
+    # the key can be a file path (local) or the key text itself (on a host)
+    if os.environ.get("KALSHI_PRIVATE_KEY"):
+        pem = os.environ["KALSHI_PRIVATE_KEY"].replace("\\n", "\n").encode()
+    else:
+        pem = open(os.environ["KALSHI_KEY_PATH"], "rb").read()
+    key = serialization.load_pem_private_key(pem, password=None)
     ts = str(int(time.time() * 1000))
     signature = key.sign((ts + "GET" + WS_PATH).encode())
     return {
-        "KALSHI-ACCESS-KEY": env["KALSHI_KEY_ID"],
+        "KALSHI-ACCESS-KEY": os.environ["KALSHI_KEY_ID"],
         "KALSHI-ACCESS-TIMESTAMP": ts,
         "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
     }

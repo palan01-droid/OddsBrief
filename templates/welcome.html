@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OddsBrief</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 420px; margin: 60px auto; padding: 0 16px; color: #222; }
+        form { border: 1px solid #ddd; border-radius: 6px; padding: 14px; margin-top: 14px; }
+        input { display: block; width: 100%; box-sizing: border-box; padding: 8px; margin: 6px 0; font-size: 15px; }
+        button { padding: 8px 14px; font-size: 15px; cursor: pointer; }
+        .gray { color: #666; font-size: 14px; }
+        .error { color: #c00; }
+    </style>
+</head>
+<body>
+<h1>OddsBrief</h1>
+<p class="gray">Live Kalshi prediction markets, big bets, and an AI-written daily brief.</p>
+
+{% for msg in get_flashed_messages() %}<p class="error">{{ msg }}</p>{% endfor %}
+
+<form method="post" action="/login">
+    <b>Log in</b>
+    <input name="username" placeholder="Username" autocomplete="username" required>
+    <input name="password" type="password" placeholder="Password" autocomplete="current-password" required>
+    <button>Log in</button>
+</form>
+
+<form method="post" action="/signup">
+    <b>Make an account</b> <span class="gray">(needed to like and comment)</span>
+    <input name="username" placeholder="Username (3-20 letters, numbers, _)" autocomplete="username" required>
+    <input name="password" type="password" placeholder="Password (8+ characters)" autocomplete="new-password" required>
+    <button>Sign up</button>
+</form>
+
+<form method="post" action="/guest">
+    <b>Just looking?</b> <span class="gray">Browse everything, no likes or comments.</span><br><br>
+    <button>Continue as guest</button>
+</form>
+</body>
+</html>

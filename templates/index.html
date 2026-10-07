@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OddsBrief</title>
+    <link href="https://fonts.googleapis.com/css2?family={{ theme.font | replace(' ', '+') }}:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: {{ theme.bg }}; --card: {{ theme.card }}; --text: {{ theme.text }}; --muted: {{ theme.muted }};
+            --accent: {{ theme.accent }}; --up: {{ theme.up }}; --down: {{ theme.down }};
+        }
+        body { font-family: "{{ theme.font }}", Arial, sans-serif; background: var(--bg); color: var(--text);
+               max-width: 900px; margin: 30px auto; padding: 0 16px; }
+        h1 { margin-bottom: 4px; color: var(--accent); }
+        h2 { margin-top: 36px; border-bottom: 1px solid var(--muted); padding-bottom: 6px; color: var(--accent); }
+        a, .link { color: var(--accent); }
+        .gray { color: var(--muted); font-size: 14px; }
+        .error { color: var(--down); font-weight: bold; }
+        .top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+        .brief { background: var(--card); border: 1px solid var(--muted); padding: 14px; border-radius: 6px; line-height: 1.5; }
+        .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+        .card { background: var(--card); border: 1px solid var(--muted); border-radius: 6px; padding: 12px; }
+        .tag { font-size: 12px; color: var(--muted); border: 1px solid var(--muted); padding: 1px 6px; border-radius: 4px; }
+        .price { font-size: 26px; font-weight: bold; }
+        .up { color: var(--up); } .down { color: var(--down); }
+        .flash { outline: 2px solid var(--accent); }
+        table { border-collapse: collapse; width: 100%; }
+        td, th { text-align: left; padding: 6px; border-bottom: 1px solid var(--muted); }
+        polyline { fill: none; stroke-width: 2; }
+        button { font: inherit; cursor: pointer; background: var(--card); color: var(--text); border: 1px solid var(--muted); border-radius: 4px; padding: 3px 10px; }
+        form.inline { display: inline; }
+        details { margin-top: 8px; font-size: 14px; }
+        .comment { border-top: 1px solid var(--muted); padding: 6px 0; }
+        textarea, input { font: inherit; width: 100%; box-sizing: border-box; background: var(--bg); color: var(--text); border: 1px solid var(--muted); border-radius: 4px; padding: 6px; }
+        #ask-form { display: flex; gap: 8px; }
+        #ask-form input { font-size: 17px; padding: 10px 12px; }
+        #ask-form button { padding: 0 18px; background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: bold; }
+        .chips { margin: 10px 0; display: flex; flex-wrap: wrap; gap: 6px; }
+        .chips button { font-size: 13px; color: var(--muted); }
+        .answer { background: var(--card); border: 1px solid var(--muted); border-radius: 6px; padding: 12px 14px; margin-top: 10px; }
+        .answer .q { font-weight: bold; color: var(--accent); margin-bottom: 6px; }
+        .answer .a { line-height: 1.5; }
+        .answer sup { color: var(--accent); }
+        .sources { margin-top: 8px; font-size: 13px; color: var(--muted); }
+        .sources span { display: inline-block; border: 1px solid var(--muted); border-radius: 4px; padding: 1px 6px; margin: 3px 4px 0 0; }
+    </style>
+</head>
+<body>
+<div class="top">
+    <h1>OddsBrief</h1>
+    <div class="gray">
+        {% if user %}Logged in as <b>{{ user.username }}</b>{% else %}Browsing as a guest{% endif %}
+        <form class="inline" method="post" action="/logout"><button>{{ 'Log out' if user else 'Log in / Sign up' }}</button></form>
+    </div>
+</div>
+<div class="gray">Kalshi prediction markets. Prices update live, everything else every {{ refresh // 60 }} min.
+    {% if updated %}Last full update {{ updated }}.{% endif %}
+    {% if theme.mood %}Today's look, picked by AI: <i>{{ theme.mood }}</i>.{% endif %} Not financial advice.</div>
+
+{% for msg in get_flashed_messages() %}<p class="error">{{ msg }}</p>{% endfor %}
+
+{% if not updated %}
+<p>Loading the first scan, this takes about a minute. The page will reload by itself.</p>
+<script>setTimeout(() => location.reload(), 15000)</script>
+{% else %}
+
+<h2>Today's brief</h2>
+<div class="brief" id="brief">{{ brief }}</div>
+
+<h2>Ask the markets</h2>
+<p class="gray">Searches market rules, past briefs and comments, then answers with sources.</p>
+<form id="ask-form">
+    <input id="ask-input" maxlength="500" placeholder="e.g. How does the {{ movers[0].event if movers else 'top' }} market settle?" autocomplete="off">
+    <button>Ask</button>
+</form>
+<div class="chips">
+    {% if movers %}<button type="button">How does the {{ movers[0].event }} market settle?</button>{% endif %}
+    <button type="button">What moved the most today?</button>
+    <button type="button">What were the biggest bets?</button>
+    <button type="button">How does the model work?</button>
+</div>
+<div id="answers"></div>
+
+<h2>Biggest moves (24h)</h2>
+<div class="cards">
+{% for m in movers %}
+    <div class="card" id="{{ m.ticker }}">
+        <span class="tag">{{ theme.emojis[loop.index0] if loop.index0 < theme.emojis|length }} {{ m.tag or m.category }}</span>
+        <p><b>{{ m.event }}</b><br>{{ m.pick }}</p>
+        <span class="price" data-ticker="{{ m.ticker }}">{{ '%.0f' % (m.price * 100) }}%</span>
+        <span class="{{ 'up' if m.price > m.prev else 'down' }}">
+            {{ '%+.0f' % ((m.price - m.prev) * 100) }} pts</span>
+        {% if m.spark %}
+        <br><svg width="140" height="40" viewBox="-2 -2 144 40">
+            <polyline points="{{ m.spark }}" stroke="var(--{{ 'up' if m.price > m.prev else 'down' }})"/></svg>
+        {% endif %}
+        <div class="gray">Order book: ${{ '{:,.0f}'.format(m.depth.yes) }} waiting on YES,
+            ${{ '{:,.0f}'.format(m.depth.no) }} on NO</div>
+
+        <form class="inline" method="post" action="/like/{{ m.ticker }}">
+            <button title="{{ 'Unlike' if m.ticker in mine else 'Like' }}">{{ '♥' if m.ticker in mine else '♡' }} {{ likes.get(m.ticker, 0) }}</button>
+        </form>
+        <details>
+            <summary class="link">{{ comments[m.ticker]|length }} comments</summary>
+            {% for c in comments[m.ticker] %}
+            <div class="comment">
+                <b>{{ c.user }}</b> <span class="gray">{{ c.time }}</span>
+                {% if c.can_delete %}
+                <form class="inline" method="post" action="/comment/{{ c.id }}/delete"><button>delete</button></form>
+                {% endif %}
+                <br>{{ c.text }}
+            </div>
+            {% endfor %}
+            {% if user %}
+            <form method="post" action="/comment/{{ m.ticker }}">
+                <textarea name="text" rows="2" maxlength="500" placeholder="Add a comment" required></textarea>
+                <button>Post</button>
+            </form>
+            {% else %}
+            <p class="gray">Make an account to comment.</p>
+            {% endif %}
+        </details>
+    </div>
+{% endfor %}
+</div>
+
+<h2>Big bets (last 24h)</h2>
+<table id="bets"><tr><td class="gray">Waiting for big bets...</td></tr></table>
+
+<h2>Where my model disagrees with the market</h2>
+{% if edges %}
+<table>
+    <tr><th>Market</th><th>Market says</th><th>Model says</th></tr>
+    {% for e in edges %}
+    <tr>
+        <td>{{ e.event }} - {{ e.pick }}</td>
+        <td data-ticker="{{ e.ticker }}">{{ '%.0f' % (e.price * 100) }}%</td>
+        <td class="{{ 'up' if e.model > e.price else 'down' }}">{{ '%.0f' % (e.model * 100) }}%</td>
+    </tr>
+    {% endfor %}
+</table>
+{% else %}
+<p class="gray">Not enough resolved markets yet ({{ score.n }}), needs 50.</p>
+{% endif %}
+
+<h2>How the model is doing</h2>
+<p class="gray">Every market is scored when it settles (Brier score, lower is better, 0.25 = coin flip).
+    The model is scored before it learns from each result.</p>
+<p>Resolved markets: <b>{{ score.n }}</b>
+    {% if score.n %} | Market: <b>{{ '%.4f' % score.market }}</b> | Model: <b>{{ '%.4f' % score.model }}</b>{% endif %}</p>
+<table>
+    <tr><th>When the market said</th><th>It actually happened</th><th>Markets</th></tr>
+    {% for label, rate, n in table %}
+    <tr><td>{{ label }}</td><td>{{ '%.0f' % (rate * 100) }}%</td><td>{{ n }}</td></tr>
+    {% endfor %}
+</table>
+{% endif %}
+
+<script>
+function esc(text) {
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+const chatHistory = [];
+const icons = {rules: "📜", brief: "📰", comment: "💬"};
+
+async function ask(message) {
+    const answers = document.getElementById("answers");
+    const box = document.createElement("div");
+    box.className = "answer";
+    box.innerHTML = `<div class="q">${esc(message)}</div><div class="a gray">Searching...</div>`;
+    answers.prepend(box);
+
+    const res = await fetch("/chat", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({message, history: chatHistory}),
+    });
+    const data = await res.json();
+    // turn [1] into a small superscript citation
+    const answer = esc(data.reply).replace(/\[(\d+)\]/g, "<sup>[$1]</sup>");
+    const sources = (data.sources || []).map(s => `<span>[${s.n}] ${icons[s.type] || ""} ${esc(s.title)}</span>`).join("");
+    box.querySelector(".a").className = "a";
+    box.querySelector(".a").innerHTML = answer;
+    if (sources) box.insertAdjacentHTML("beforeend", `<div class="sources">Sources: ${sources}</div>`);
+    chatHistory.push({role: "user", text: message}, {role: "bot", text: data.reply});
+}
+
+const askForm = document.getElementById("ask-form");
+if (askForm) {
+    askForm.addEventListener("submit", e => {
+        e.preventDefault();
+        const input = document.getElementById("ask-input");
+        if (input.value.trim()) ask(input.value.trim());
+        input.value = "";
+    });
+    document.querySelectorAll(".chips button").forEach(b => b.addEventListener("click", () => ask(b.textContent)));
+}
+
+async function updateLive() {
+    const tickers = [...new Set([...document.querySelectorAll("[data-ticker]")].map(el => el.dataset.ticker))];
+    const res = await fetch("/live?tickers=" + tickers.join(","));
+    const data = await res.json();
+
+    // new data is ready, reload to show it (but not while someone is typing or reading answers)
+    const typing = document.activeElement && ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
+    const reading = document.querySelector(".answer");
+    if (data.updated !== "{{ updated }}" && !typing && !reading) location.reload();
+    const brief = document.getElementById("brief");
+    if (brief && data.brief) brief.textContent = data.brief;
+
+    document.querySelectorAll("[data-ticker]").forEach(el => {
+        const p = data.prices[el.dataset.ticker];
+        if (p === undefined) return;
+        const text = Math.round(p * 100) + "%";
+        if (el.textContent !== text) {
+            el.textContent = text;
+            el.classList.add("flash");
+            setTimeout(() => el.classList.remove("flash"), 1000);
+        }
+    });
+
+    const rows = data.bets.map(b =>
+        `<tr><td>${b.time} UTC</td><td><b>$${Math.round(b.dollars).toLocaleString()}</b> on ${b.side.toUpperCase()}
+         at ${Math.round(b.price * 100)}¢</td><td>${esc(b.title)}</td></tr>`);
+    const bets = document.getElementById("bets");
+    if (bets && rows.length) bets.innerHTML = rows.join("");
+}
+updateLive();
+setInterval(updateLive, 3000);
+</script>
+</body>
+</html>

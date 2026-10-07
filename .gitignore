@@ -5,3 +5,4 @@ __pycache__/
 .DS_Store
 *.key
 state.json
+chroma_db/

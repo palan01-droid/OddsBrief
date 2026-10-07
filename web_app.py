@@ -1,17 +1,28 @@
 import json
+import os
+import re
+import secrets
 import sqlite3
 import threading
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-import requests
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
 
+import ai
 import collect
 import learn
 import live
+import rag
+import theme
 
 app = Flask(__name__)
+app.secret_key = os.environ["SECRET_KEY"]
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"  # other sites can't post forms as a logged-in user
+ADMIN = os.environ.get("ADMIN_USERNAME", "").lower()
+
 REFRESH_SECONDS = 600
 STATE_FILE = "state.json"
 
@@ -22,6 +33,8 @@ try:
 except FileNotFoundError:
     state = {}
 
+
+# ---------- data ----------
 
 def sparkline(series, ticker):
     w, h = 140, 36
@@ -64,16 +77,9 @@ def write_brief(movers, bets):
         for b in bets[:5]
     ) or "- none yet"
     try:
-        r = requests.post("http://localhost:11434/api/generate", timeout=120, json={
-            "model": "llama3.2",
-            "prompt": BRIEF_PROMPT.format(moves=moves, bets=bets_text),
-            "stream": False,
-            "options": {"temperature": 0},
-        })
-        r.raise_for_status()
-        return r.json()["response"].strip()
+        return ai.ask(BRIEF_PROMPT.format(moves=moves, bets=bets_text))
     except Exception as e:
-        return f"Couldn't write the brief, is Ollama running? ({e})"
+        return f"Couldn't write the brief right now. ({e})"
 
 
 def refresh():
@@ -108,6 +114,7 @@ def refresh():
         "edges": edges[:6],
         "score": score,
         "table": learn.calibration_table(cal),
+        "theme": theme.pick_theme(movers),
         "brief": state.get("brief", "Writing today's brief..."),
     })
 
@@ -115,6 +122,14 @@ def refresh():
     state["brief"] = write_brief(movers, bets)
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
+
+    # save new market rules and this brief for the chatbot to search later
+    try:
+        added = rag.add_rules(markets)
+        rag.add_brief(datetime.now().strftime("%b %-d, %-I:%M %p"), state["brief"], movers)
+        print(f"rag: added {added} market rules, {rag.docs.count()} documents total")
+    except Exception as e:
+        print("rag update failed:", e)
 
 
 def refresh_forever():
@@ -127,147 +142,252 @@ def refresh_forever():
         time.sleep(REFRESH_SECONDS)
 
 
-PAGE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>OddsBrief</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 900px; margin: 30px auto; padding: 0 16px; color: #222; }
-        h1 { margin-bottom: 4px; }
-        h2 { margin-top: 36px; border-bottom: 1px solid #ddd; padding-bottom: 6px; }
-        .gray { color: #777; font-size: 14px; }
-        .brief { background: #f5f5f5; padding: 14px; border-radius: 6px; line-height: 1.5; }
-        .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-        .card { border: 1px solid #ddd; border-radius: 6px; padding: 12px; }
-        .tag { font-size: 12px; color: #555; background: #eee; padding: 2px 6px; border-radius: 4px; }
-        .price { font-size: 26px; font-weight: bold; }
-        .up { color: green; } .down { color: #c00; }
-        .flash { background: #fff3b0; transition: background 1s; }
-        table { border-collapse: collapse; width: 100%; }
-        td, th { text-align: left; padding: 6px; border-bottom: 1px solid #eee; }
-        polyline { fill: none; stroke-width: 2; }
-    </style>
-</head>
-<body>
-<h1>OddsBrief</h1>
-<div class="gray">Kalshi prediction markets. Prices update live, everything else every {{ refresh // 60 }} min.
-    {% if updated %}Last full update {{ updated }}.{% endif %} Not financial advice.</div>
+# ---------- users ----------
 
-{% if not updated %}
-<p>Loading the first scan, this takes about a minute. The page will reload by itself.</p>
-<script>setTimeout(() => location.reload(), 15000)</script>
-{% else %}
+hits = defaultdict(list)
 
-<h2>Today's brief</h2>
-<div class="brief" id="brief">{{ brief }}</div>
 
-<h2>Biggest moves (24h)</h2>
-<div class="cards">
-{% for m in movers %}
-    <div class="card">
-        <span class="tag">{{ m.tag or m.category }}</span>
-        <p><b>{{ m.event }}</b><br>{{ m.pick }}</p>
-        <span class="price" data-ticker="{{ m.ticker }}">{{ '%.0f' % (m.price * 100) }}%</span>
-        <span class="{{ 'up' if m.price > m.prev else 'down' }}">
-            {{ '%+.0f' % ((m.price - m.prev) * 100) }} pts</span>
-        {% if m.spark %}
-        <br><svg width="140" height="40" viewBox="-2 -2 144 40">
-            <polyline points="{{ m.spark }}" stroke="{{ 'green' if m.price > m.prev else '#c00' }}"/></svg>
-        {% endif %}
-        <div class="gray">Order book: ${{ '{:,.0f}'.format(m.depth.yes) }} waiting on YES,
-            ${{ '{:,.0f}'.format(m.depth.no) }} on NO</div>
-    </div>
-{% endfor %}
-</div>
+def too_many(key, limit, seconds):
+    now = time.time()
+    hits[key] = [t for t in hits[key] if now - t < seconds]
+    if len(hits[key]) >= limit:
+        return True
+    hits[key].append(now)
+    return False
 
-<h2>Big bets (last 24h)</h2>
-<table id="bets"><tr><td class="gray">Waiting for big bets...</td></tr></table>
 
-<h2>Where my model disagrees with the market</h2>
-{% if edges %}
-<table>
-    <tr><th>Market</th><th>Market says</th><th>Model says</th></tr>
-    {% for e in edges %}
-    <tr>
-        <td>{{ e.event }} - {{ e.pick }}</td>
-        <td data-ticker="{{ e.ticker }}">{{ '%.0f' % (e.price * 100) }}%</td>
-        <td class="{{ 'up' if e.model > e.price else 'down' }}">{{ '%.0f' % (e.model * 100) }}%</td>
-    </tr>
-    {% endfor %}
-</table>
-{% else %}
-<p class="gray">Not enough resolved markets yet ({{ score.n }}), needs 50.</p>
-{% endif %}
+def get_db():
+    return sqlite3.connect(collect.DB)
 
-<h2>How the model is doing</h2>
-<p class="gray">Every market is scored when it settles (Brier score, lower is better, 0.25 = coin flip).
-    The model is scored before it learns from each result.</p>
-<p>Resolved markets: <b>{{ score.n }}</b>
-    {% if score.n %} | Market: <b>{{ '%.4f' % score.market }}</b> | Model: <b>{{ '%.4f' % score.model }}</b>{% endif %}</p>
-<table>
-    <tr><th>When the market said</th><th>It actually happened</th><th>Markets</th></tr>
-    {% for label, rate, n in table %}
-    <tr><td>{{ label }}</td><td>{{ '%.0f' % (rate * 100) }}%</td><td>{{ n }}</td></tr>
-    {% endfor %}
-</table>
 
-<script>
-function esc(text) {
-    const div = document.createElement("div");
-    div.textContent = text;
-    return div.innerHTML;
-}
+def current_user():
+    if "user_id" not in session:
+        return None
+    db = get_db()
+    row = db.execute("SELECT id, username FROM users WHERE id=?", (session["user_id"],)).fetchone()
+    db.close()
+    return {"id": row[0], "username": row[1], "admin": row[1].lower() == ADMIN} if row else None
 
-async function updateLive() {
-    const tickers = [...new Set([...document.querySelectorAll("[data-ticker]")].map(el => el.dataset.ticker))];
-    const res = await fetch("/live?tickers=" + tickers.join(","));
-    const data = await res.json();
 
-    // new data is ready, reload to show it
-    if (data.updated !== "{{ updated }}") location.reload();
-    document.getElementById("brief").textContent = data.brief;
+@app.route("/signup", methods=["POST"])
+def signup():
+    username = request.form.get("username", "").strip()
+    password = request.form.get("password", "")
+    if not re.fullmatch(r"[A-Za-z0-9_]{3,20}", username):
+        flash("Username must be 3-20 letters, numbers or _.")
+    elif not 8 <= len(password) <= 128:
+        flash("Password must be at least 8 characters.")
+    else:
+        db = get_db()
+        try:
+            cur = db.execute("INSERT INTO users (username, password_hash, created) VALUES (?,?,?)",
+                             (username, generate_password_hash(password), datetime.now(timezone.utc).isoformat()))
+            db.commit()
+            session.clear()
+            session["user_id"] = cur.lastrowid
+        except sqlite3.IntegrityError:
+            flash("That username is taken.")
+        db.close()
+    return redirect(url_for("home"))
 
-    document.querySelectorAll("[data-ticker]").forEach(el => {
-        const p = data.prices[el.dataset.ticker];
-        if (p === undefined) return;
-        const text = Math.round(p * 100) + "%";
-        if (el.textContent !== text) {
-            el.textContent = text;
-            el.classList.add("flash");
-            setTimeout(() => el.classList.remove("flash"), 1000);
-        }
-    });
 
-    const rows = data.bets.map(b =>
-        `<tr><td>${b.time} UTC</td><td><b>$${Math.round(b.dollars).toLocaleString()}</b> on ${b.side.toUpperCase()}
-         at ${Math.round(b.price * 100)}¢</td><td>${esc(b.title)}</td></tr>`);
-    if (rows.length) document.getElementById("bets").innerHTML = rows.join("");
-}
-updateLive();
-setInterval(updateLive, 3000);
-</script>
-{% endif %}
-</body>
-</html>
-"""
+@app.route("/login", methods=["POST"])
+def login():
+    username = request.form.get("username", "").strip()
+    if too_many(f"login:{request.remote_addr}", 10, 600):
+        flash("Too many tries, wait a few minutes.")
+        return redirect(url_for("home"))
+    db = get_db()
+    row = db.execute("SELECT id, password_hash FROM users WHERE username=?", (username,)).fetchone()
+    db.close()
+    if row and check_password_hash(row[1], request.form.get("password", "")):
+        session.clear()
+        session["user_id"] = row[0]
+    else:
+        flash("Wrong username or password.")
+    return redirect(url_for("home"))
 
+
+@app.route("/guest", methods=["POST"])
+def guest():
+    session.clear()
+    session["guest"] = secrets.token_hex(8)
+    return redirect(url_for("home"))
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("home"))
+
+
+@app.route("/like/<ticker>", methods=["POST"])
+def like(ticker):
+    user = current_user()
+    if not user:
+        flash("Make an account to like markets.")
+        return redirect(url_for("home"))
+    db = get_db()
+    if db.execute("DELETE FROM likes WHERE user_id=? AND ticker=?", (user["id"], ticker)).rowcount == 0:
+        db.execute("INSERT INTO likes VALUES (?,?)", (user["id"], ticker))
+    db.commit()
+    db.close()
+    return redirect(url_for("home") + "#" + ticker)
+
+
+@app.route("/comment/<ticker>", methods=["POST"])
+def comment(ticker):
+    user = current_user()
+    text = request.form.get("text", "").strip()
+    if not user:
+        flash("Make an account to comment.")
+    elif not 1 <= len(text) <= 500:
+        flash("Comments need to be 1-500 characters.")
+    elif too_many(f"comment:{user['id']}", 5, 60):
+        flash("Slow down a little.")
+    else:
+        db = get_db()
+        cur = db.execute("INSERT INTO comments (user_id, ticker, text, time) VALUES (?,?,?,?)",
+                         (user["id"], ticker, text, datetime.now(timezone.utc).isoformat()))
+        db.commit()
+        db.close()
+        market = next((f"{m['event']} - {m['pick']}" for m in state.get("movers", []) if m["ticker"] == ticker), ticker)
+        rag.add_comment(cur.lastrowid, user["username"], market, text)
+    return redirect(url_for("home") + "#" + ticker)
+
+
+@app.route("/comment/<int:comment_id>/delete", methods=["POST"])
+def delete_comment(comment_id):
+    user = current_user()
+    if user:
+        db = get_db()
+        if user["admin"]:
+            deleted = db.execute("DELETE FROM comments WHERE id=?", (comment_id,)).rowcount
+        else:
+            deleted = db.execute("DELETE FROM comments WHERE id=? AND user_id=?", (comment_id, user["id"])).rowcount
+        db.commit()
+        db.close()
+        if deleted:
+            rag.delete_comment(comment_id)
+    return redirect(request.referrer or url_for("home"))
+
+
+def social(tickers, user):
+    db = get_db()
+    marks = ",".join("?" * len(tickers))
+    likes = dict(db.execute(f"SELECT ticker, COUNT(*) FROM likes WHERE ticker IN ({marks}) GROUP BY ticker", tickers))
+    mine = {t for (t,) in db.execute("SELECT ticker FROM likes WHERE user_id=?", (user["id"] if user else -1,))}
+    comments = defaultdict(list)
+    for cid, ticker, text, when, uid, name in db.execute(f"""
+        SELECT c.id, c.ticker, c.text, c.time, u.id, u.username FROM comments c JOIN users u ON u.id = c.user_id
+        WHERE c.ticker IN ({marks}) ORDER BY c.time
+    """, tickers):
+        can_delete = bool(user) and (user["admin"] or user["id"] == uid)
+        comments[ticker].append({"id": cid, "text": text, "time": when[:16].replace("T", " "), "user": name, "can_delete": can_delete})
+    db.close()
+    return likes, mine, comments
+
+
+# ---------- chatbot ----------
+
+CHAT_SYSTEM = """You are the help bot for OddsBrief, a website that tracks Kalshi prediction markets.
+Only answer questions about OddsBrief, the markets and numbers shown on it, prediction markets in general,
+and how the site works. For anything else (homework, coding, other topics), say you can only help with OddsBrief.
+Never give betting or financial advice, never tell people what to buy or sell. Keep answers short (2-4 sentences).
+Only use the facts below and the numbered sources, if you don't know, say so.
+When you use a numbered source, cite it like [1].
+
+How OddsBrief works:
+- It scans all open Kalshi markets every 10 minutes and tracks the 500 most traded.
+- Prices are the market's odds: 70% means traders think there's about a 70% chance it happens.
+- "Biggest moves" are the largest price changes in the last 24 hours. The line shows the last 48 hours.
+- "Order book" is how much money is waiting to buy YES or NO near the current price.
+- "Big bets" are single trades of $5,000 or more, streamed live from Kalshi.
+- The model learns how often markets at each price really happen, by category, from past results.
+  It's scored with a Brier score (lower is better) before it learns from each result.
+- The daily brief, the colors and the emojis are picked by AI every refresh.
+- Anyone can browse as a guest, an account is needed to like and comment.
+- The "Ask the markets" box searches Kalshi's official market rules, past daily briefs and user comments.
+
+What's on the site right now:
+{context}
+
+Sources found for this question (market rules, past briefs, user comments):
+{sources}"""
+
+
+def chat_context():
+    lines = [f"Last update: {state.get('updated', 'not yet')}"]
+    for m in state.get("movers", []):
+        lines.append(f"Mover: {m['event']} / {m['pick']}: {m['prev']:.0%} -> {m['price']:.0%}")
+    for e in state.get("edges", []):
+        lines.append(f"Model disagrees: {e['event']} / {e['pick']}: market {e['price']:.0%}, model {e['model']:.0%}")
+    score = state.get("score") or {}
+    if score.get("n"):
+        lines.append(f"Model score: {score['n']} resolved markets, market Brier {score['market']:.4f}, model {score['model']:.4f}")
+    db = get_db()
+    for b in big_bets(db)[:5]:
+        lines.append(f"Big bet: ${b['dollars']:,.0f} on {b['side'].upper()} at {b['price']:.0%} in {b['title']}")
+    db.close()
+    lines.append(f"Today's brief: {state.get('brief', '')}")
+    return "\n".join(lines)
+
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    who = session.get("user_id") or session.get("guest")
+    if not who:
+        return jsonify({"reply": "Pick log in or guest first."}), 403
+    if too_many(f"chat:{who}", 15, 600):
+        return jsonify({"reply": "You've hit the chat limit, try again in a few minutes."}), 429
+    data = request.get_json(silent=True) or {}
+    message = str(data.get("message", "")).strip()[:500]
+    if not message:
+        return jsonify({"reply": "Ask me something about OddsBrief."})
+    history = data.get("history", [])[-6:]
+    transcript = "\n".join(f"{'User' if h.get('role') == 'user' else 'Bot'}: {str(h.get('text', ''))[:500]}" for h in history)
+    prompt = f"{transcript}\nUser: {message}\nBot:"
+
+    hits = rag.search(message)
+    sources = "\n\n".join(f"[{i + 1}] {h['text']}" for i, h in enumerate(hits)) or "none"
+    try:
+        reply = ai.ask(prompt, system=CHAT_SYSTEM.format(context=chat_context(), sources=sources))
+    except Exception as e:
+        print("chat failed:", e)
+        return jsonify({"reply": "Sorry, I can't answer right now.", "sources": []})
+    # only show the sources the answer actually used
+    used = [{"n": i + 1, "type": h["type"], "title": h["title"]} for i, h in enumerate(hits) if f"[{i + 1}]" in reply]
+    return jsonify({"reply": reply, "sources": used})
+
+
+# ---------- pages ----------
 
 @app.route("/")
 def home():
-    return render_template_string(PAGE, refresh=REFRESH_SECONDS, **state)
+    user = current_user()
+    if not user and "guest" not in session:
+        return render_template("welcome.html")
+    movers = state.get("movers", [])
+    likes, mine, comments = social([m["ticker"] for m in movers] or [""], user)
+    page = dict(state)
+    page["theme"] = page.get("theme") or dict(theme.DEFAULT, emojis=[])
+    return render_template("index.html", refresh=REFRESH_SECONDS, user=user, likes=likes, mine=mine,
+                           comments=comments, **page)
 
 
 @app.route("/live")
 def live_data():
     tickers = request.args.get("tickers", "").split(",")
-    db = sqlite3.connect(collect.DB)
+    db = get_db()
     bets = big_bets(db)
     db.close()
     return jsonify({"prices": {t: live.prices[t] for t in tickers if t in live.prices}, "bets": bets,
                     "updated": state.get("updated"), "brief": state.get("brief")})
+
+
+@app.route("/health")
+def health():
+    return "ok"
 
 
 if __name__ == "__main__":
