@@ -2,7 +2,10 @@ import sys
 
 from collect import db, get_events, get_tags, save_market, fill_forecasts
 
-PAGES = int(sys.argv[1]) if len(sys.argv) > 1 else 5
+# run: python backfill.py 30   (more pages = more past markets to learn from)
+PAGES = 5
+if len(sys.argv) > 1:
+    PAGES = int(sys.argv[1])
 MIN_VOLUME = 10000
 
 tags = get_tags()
