@@ -501,6 +501,16 @@ def history(ticker):
     return jsonify({"points": points})
 
 
+@app.route("/whoami")
+def whoami():
+    # temporary: shows which ip headers render passes along, so the rate limits use the real visitor ip
+    return jsonify({"remote_addr": request.remote_addr,
+                    "x_forwarded_for": request.headers.get("X-Forwarded-For"),
+                    "true_client_ip": request.headers.get("True-Client-Ip"),
+                    "cf_connecting_ip": request.headers.get("Cf-Connecting-Ip"),
+                    "x_real_ip": request.headers.get("X-Real-Ip")})
+
+
 @app.route("/health")
 def health():
     return "ok"
