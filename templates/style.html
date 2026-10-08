@@ -1,0 +1,48 @@
+{# shared look for every page, the colors and font come from the AI theme #}
+<link href="https://fonts.googleapis.com/css2?family={{ theme.font | replace(' ', '+') }}:wght@400;700&display=swap" rel="stylesheet">
+<style>
+    :root {
+        --bg: {{ theme.bg }}; --card: {{ theme.card }}; --text: {{ theme.text }}; --muted: {{ theme.muted }};
+        --accent: {{ theme.accent }}; --up: {{ theme.up }}; --down: {{ theme.down }};
+    }
+    body { font-family: "{{ theme.font }}", Arial, sans-serif; background: var(--bg); color: var(--text);
+           max-width: 900px; margin: 30px auto; padding: 0 16px; }
+    h1 { margin-bottom: 4px; color: var(--accent); }
+    h2 { margin-top: 36px; border-bottom: 1px solid var(--muted); padding-bottom: 6px; color: var(--accent); }
+    a, .link { color: var(--accent); }
+    .gray { color: var(--muted); font-size: 14px; }
+    .error { color: var(--down); font-weight: bold; }
+    .top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+    .brief { background: var(--card); border: 1px solid var(--muted); padding: 14px; border-radius: 6px; line-height: 1.5; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+    .card { background: var(--card); border: 1px solid var(--muted); border-radius: 6px; padding: 12px; }
+    .tag { font-size: 12px; color: var(--muted); border: 1px solid var(--muted); padding: 1px 6px; border-radius: 4px; }
+    .price { font-size: 26px; font-weight: bold; }
+    .up { color: var(--up); } .down { color: var(--down); }
+    .flash { outline: 2px solid var(--accent); }
+    table { border-collapse: collapse; width: 100%; }
+    td, th { text-align: left; padding: 6px; border-bottom: 1px solid var(--muted); }
+    polyline { fill: none; stroke-width: 2; }
+    button { font: inherit; cursor: pointer; background: var(--card); color: var(--text); border: 1px solid var(--muted); border-radius: 4px; padding: 3px 10px; }
+    form.inline { display: inline; }
+    details { margin-top: 8px; font-size: 14px; }
+    .comment { border-top: 1px solid var(--muted); padding: 6px 0; }
+    textarea, input { font: inherit; width: 100%; box-sizing: border-box; background: var(--bg); color: var(--text); border: 1px solid var(--muted); border-radius: 4px; padding: 6px; }
+    #ask-form { display: flex; gap: 8px; }
+    #ask-form input { font-size: 17px; padding: 10px 12px; }
+    #ask-form button { padding: 0 18px; background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: bold; }
+    .chips { margin: 10px 0; display: flex; flex-wrap: wrap; gap: 6px; }
+    .chips button { font-size: 13px; color: var(--muted); }
+    .answer { background: var(--card); border: 1px solid var(--muted); border-radius: 6px; padding: 12px 14px; margin-top: 10px; }
+    .answer .q { font-weight: bold; color: var(--accent); margin-bottom: 6px; }
+    .answer .a { line-height: 1.5; }
+    .answer sup { color: var(--accent); }
+    .sources { margin-top: 8px; font-size: 13px; color: var(--muted); }
+    .sources span { display: inline-block; border: 1px solid var(--muted); border-radius: 4px; padding: 1px 6px; margin: 3px 4px 0 0; }
+    dialog { background: var(--card); color: var(--text); border: 1px solid var(--muted); border-radius: 8px;
+             width: min(760px, 94vw); padding: 16px; }
+    dialog::backdrop { background: rgba(0, 0, 0, .5); }
+    .chart-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .ranges button.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+    .chart-box { position: relative; height: 320px; margin-top: 10px; }
+</style>

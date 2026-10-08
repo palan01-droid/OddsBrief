@@ -4,47 +4,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>OddsBrief</title>
-    <link href="https://fonts.googleapis.com/css2?family={{ theme.font | replace(' ', '+') }}:wght@400;700&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --bg: {{ theme.bg }}; --card: {{ theme.card }}; --text: {{ theme.text }}; --muted: {{ theme.muted }};
-            --accent: {{ theme.accent }}; --up: {{ theme.up }}; --down: {{ theme.down }};
-        }
-        body { font-family: "{{ theme.font }}", Arial, sans-serif; background: var(--bg); color: var(--text);
-               max-width: 900px; margin: 30px auto; padding: 0 16px; }
-        h1 { margin-bottom: 4px; color: var(--accent); }
-        h2 { margin-top: 36px; border-bottom: 1px solid var(--muted); padding-bottom: 6px; color: var(--accent); }
-        a, .link { color: var(--accent); }
-        .gray { color: var(--muted); font-size: 14px; }
-        .error { color: var(--down); font-weight: bold; }
-        .top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
-        .brief { background: var(--card); border: 1px solid var(--muted); padding: 14px; border-radius: 6px; line-height: 1.5; }
-        .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-        .card { background: var(--card); border: 1px solid var(--muted); border-radius: 6px; padding: 12px; }
-        .tag { font-size: 12px; color: var(--muted); border: 1px solid var(--muted); padding: 1px 6px; border-radius: 4px; }
-        .price { font-size: 26px; font-weight: bold; }
-        .up { color: var(--up); } .down { color: var(--down); }
-        .flash { outline: 2px solid var(--accent); }
-        table { border-collapse: collapse; width: 100%; }
-        td, th { text-align: left; padding: 6px; border-bottom: 1px solid var(--muted); }
-        polyline { fill: none; stroke-width: 2; }
-        button { font: inherit; cursor: pointer; background: var(--card); color: var(--text); border: 1px solid var(--muted); border-radius: 4px; padding: 3px 10px; }
-        form.inline { display: inline; }
-        details { margin-top: 8px; font-size: 14px; }
-        .comment { border-top: 1px solid var(--muted); padding: 6px 0; }
-        textarea, input { font: inherit; width: 100%; box-sizing: border-box; background: var(--bg); color: var(--text); border: 1px solid var(--muted); border-radius: 4px; padding: 6px; }
-        #ask-form { display: flex; gap: 8px; }
-        #ask-form input { font-size: 17px; padding: 10px 12px; }
-        #ask-form button { padding: 0 18px; background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: bold; }
-        .chips { margin: 10px 0; display: flex; flex-wrap: wrap; gap: 6px; }
-        .chips button { font-size: 13px; color: var(--muted); }
-        .answer { background: var(--card); border: 1px solid var(--muted); border-radius: 6px; padding: 12px 14px; margin-top: 10px; }
-        .answer .q { font-weight: bold; color: var(--accent); margin-bottom: 6px; }
-        .answer .a { line-height: 1.5; }
-        .answer sup { color: var(--accent); }
-        .sources { margin-top: 8px; font-size: 13px; color: var(--muted); }
-        .sources span { display: inline-block; border: 1px solid var(--muted); border-radius: 4px; padding: 1px 6px; margin: 3px 4px 0 0; }
-    </style>
+    {% include "style.html" %}
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 </head>
 <body>
 <div class="top">
@@ -98,6 +59,7 @@
         <div class="gray">Order book: ${{ '{:,.0f}'.format(m.depth.yes) }} waiting on YES,
             ${{ '{:,.0f}'.format(m.depth.no) }} on NO</div>
 
+        <button type="button" class="open-chart" data-chart="{{ m.ticker }}" data-title="{{ m.event }} - {{ m.pick }}">📈 Chart</button>
         <form class="inline" method="post" action="/like/{{ m.ticker }}">
             <button title="{{ 'Unlike' if m.ticker in mine else 'Like' }}">{{ '♥' if m.ticker in mine else '♡' }} {{ likes.get(m.ticker, 0) }}</button>
         </form>
@@ -149,12 +111,30 @@
     The model is scored before it learns from each result.</p>
 <p>Resolved markets: <b>{{ score.n }}</b>
     {% if score.n %} | Market: <b>{{ '%.4f' % score.market }}</b> | Model: <b>{{ '%.4f' % score.model }}</b>{% endif %}</p>
+<div class="chart-box"><canvas id="calibration"></canvas></div>
+<details>
+<summary class="link">Show as a table</summary>
 <table>
     <tr><th>When the market said</th><th>It actually happened</th><th>Markets</th></tr>
-    {% for label, rate, n in table %}
+    {% for label, rate, n, middle in table %}
     <tr><td>{{ label }}</td><td>{{ '%.0f' % (rate * 100) }}%</td><td>{{ n }}</td></tr>
     {% endfor %}
 </table>
+</details>
+
+<dialog id="chart-dialog">
+    <div class="chart-top">
+        <b id="chart-title"></b>
+        <span class="ranges">
+            <button type="button" data-range="day">1D</button>
+            <button type="button" data-range="week">1W</button>
+            <button type="button" data-range="month">1M</button>
+            <button type="button" id="chart-close">✕</button>
+        </span>
+    </div>
+    <div class="chart-box"><canvas id="price-chart"></canvas></div>
+    <p class="gray" id="chart-note"></p>
+</dialog>
 {% endif %}
 
 <script>
@@ -200,6 +180,87 @@ if (askForm) {
     document.querySelectorAll(".chips button").forEach(b => b.addEventListener("click", () => ask(b.textContent)));
 }
 
+// ---- charts ----
+function themeColor(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+let priceChart = null;
+let chartTicker = null;
+let chartRange = "day";
+
+async function loadChart() {
+    document.querySelectorAll(".ranges [data-range]").forEach(b => b.classList.toggle("on", b.dataset.range === chartRange));
+    document.getElementById("chart-note").textContent = "Loading...";
+    const res = await fetch(`/history/${chartTicker}?range=${chartRange}`);
+    const data = await res.json();
+    if (!res.ok) {
+        document.getElementById("chart-note").textContent = data.error || "Couldn't load the chart.";
+        return;
+    }
+    const labels = data.points.map(p => new Date(p.t * 1000).toLocaleString([], {month: "short", day: "numeric", hour: "numeric"}));
+    const prices = data.points.map(p => Math.round(p.price * 1000) / 10);
+    if (priceChart) priceChart.destroy();
+    priceChart = new Chart(document.getElementById("price-chart"), {
+        type: "line",
+        data: {labels, datasets: [{label: "Chance of YES (%)", data: prices, borderColor: themeColor("--accent"),
+                                    pointRadius: 0, tension: 0.2, fill: false}]},
+        options: {
+            maintainAspectRatio: false,
+            interaction: {mode: "index", intersect: false},
+            plugins: {legend: {display: false}, tooltip: {callbacks: {label: c => c.parsed.y + "%"}}},
+            scales: {
+                y: {min: 0, max: 100, ticks: {color: themeColor("--muted"), callback: v => v + "%"}, grid: {color: themeColor("--muted") + "33"}},
+                x: {ticks: {color: themeColor("--muted"), maxTicksLimit: 6}, grid: {display: false}},
+            },
+        },
+    });
+    document.getElementById("chart-note").textContent = "Hover for exact prices. New live prices get added while this is open.";
+}
+
+document.querySelectorAll(".open-chart").forEach(b => b.addEventListener("click", () => {
+    chartTicker = b.dataset.chart;
+    chartRange = "day";
+    document.getElementById("chart-title").textContent = b.dataset.title;
+    document.getElementById("chart-dialog").showModal();
+    loadChart();
+}));
+document.querySelectorAll(".ranges [data-range]").forEach(b => b.addEventListener("click", () => {
+    chartRange = b.dataset.range;
+    loadChart();
+}));
+const chartClose = document.getElementById("chart-close");
+if (chartClose) chartClose.addEventListener("click", () => document.getElementById("chart-dialog").close());
+
+// calibration: dots = what really happened, dashed line = a perfect forecaster
+const table = {{ table | tojson }};
+const calibrationCanvas = document.getElementById("calibration");
+if (calibrationCanvas && table.length) {
+    new Chart(calibrationCanvas, {
+        type: "scatter",
+        data: {datasets: [
+            {label: "Markets", data: table.map(r => ({x: r[3] * 100, y: Math.round(r[1] * 1000) / 10, n: r[2]})),
+             backgroundColor: themeColor("--accent"), pointRadius: table.map(r => Math.min(14, 3 + Math.sqrt(r[2])))},
+            {label: "Perfect", type: "line", data: [{x: 0, y: 0}, {x: 100, y: 100}],
+             borderColor: themeColor("--muted"), borderDash: [6, 6], pointRadius: 0},
+        ]},
+        options: {
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {labels: {color: themeColor("--muted")}},
+                tooltip: {callbacks: {label: c => c.datasetIndex === 0
+                    ? `Market said ~${Math.round(c.parsed.x)}%, happened ${c.parsed.y}% (${c.raw.n} markets)` : "Perfect forecaster"}},
+            },
+            scales: {
+                x: {min: 0, max: 100, title: {display: true, text: "What the market said (%)", color: themeColor("--muted")},
+                    ticks: {color: themeColor("--muted")}, grid: {color: themeColor("--muted") + "33"}},
+                y: {min: 0, max: 100, title: {display: true, text: "How often it happened (%)", color: themeColor("--muted")},
+                    ticks: {color: themeColor("--muted")}, grid: {color: themeColor("--muted") + "33"}},
+            },
+        },
+    });
+}
+
 async function updateLive() {
     const tickers = [...new Set([...document.querySelectorAll("[data-ticker]")].map(el => el.dataset.ticker))];
     const res = await fetch("/live?tickers=" + tickers.join(","));
@@ -207,10 +268,21 @@ async function updateLive() {
 
     // new data is ready, reload to show it (but not while someone is typing or reading answers)
     const typing = document.activeElement && ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
-    const reading = document.querySelector(".answer");
+    const reading = document.querySelector(".answer") || document.getElementById("chart-dialog")?.open;
     if (data.updated !== "{{ updated }}" && !typing && !reading) location.reload();
     const brief = document.getElementById("brief");
     if (brief && data.brief) brief.textContent = data.brief;
+
+    // add the newest price to the open chart
+    if (priceChart && chartTicker && data.prices[chartTicker] !== undefined && document.getElementById("chart-dialog").open) {
+        const latest = Math.round(data.prices[chartTicker] * 1000) / 10;
+        const points = priceChart.data.datasets[0].data;
+        if (points[points.length - 1] !== latest) {
+            priceChart.data.labels.push(new Date().toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"}));
+            points.push(latest);
+            priceChart.update("none");
+        }
+    }
 
     document.querySelectorAll("[data-ticker]").forEach(el => {
         const p = data.prices[el.dataset.ticker];

@@ -68,19 +68,31 @@ def price_of(m):
     return float(m["last_price_dollars"])
 
 
-def get_events(status, max_pages=None):
-    # returns a list of (event, market) pairs, going through every page
+def volume_24h(row):
+    event, market = row
+    return float(market["volume_24h_fp"] or 0)
+
+
+def get_events(status, max_pages=None, keep_top=None):
+    # returns a list of (event, market) pairs, going through every page.
+    # keep_top only keeps the most traded ones as we go, so we don't hold 100k+ markets in memory
     results = []
     cursor = None
     pages = 0
     while True:
-        page = get("/events", limit=200, status=status, with_nested_markets="true", cursor=cursor)
+        # smaller pages use less memory (the free server only has 512 MB)
+        page = get("/events", limit=100, status=status, with_nested_markets="true", cursor=cursor)
         for event in page["events"]:
             markets = event.get("markets")
             if markets is None:
                 continue
+            # only keep the event fields we use, so each market doesn't drag its whole event along
+            info = {"title": event["title"], "series_ticker": event["series_ticker"], "category": event.get("category")}
             for market in markets:
-                results.append((event, market))
+                results.append((info, market))
+        if keep_top and len(results) > keep_top * 4:
+            results.sort(key=volume_24h, reverse=True)
+            results = results[:keep_top]
         cursor = page.get("cursor")
         pages += 1
         if not cursor or pages == max_pages:
@@ -88,30 +100,34 @@ def get_events(status, max_pages=None):
     return results
 
 
-def get_tags():
-    # series ticker -> a short label like "Football"
-    tags = {}
-    for s in get("/series")["series"]:
+tags = {}  # series ticker -> a short label like "Football", saved so we only look each one up once
+
+
+def get_tag(series_ticker):
+    # (the full /series list is ~20 MB, too big for the free server, so look them up one at a time)
+    if series_ticker not in tags:
+        s = get("/series/" + series_ticker)["series"]
         if s.get("tags"):
-            tags[s["ticker"]] = s["tags"][0]
+            tags[series_ticker] = s["tags"][0]
         elif s.get("category"):
-            tags[s["ticker"]] = s["category"]
+            tags[series_ticker] = s["category"]
         else:
-            tags[s["ticker"]] = ""
-    return tags
+            tags[series_ticker] = ""
+    return tags[series_ticker]
 
 
-def save_market(e, m, tags, result=None):
+def save_market(e, m, result=None):
     subtitle = m.get("yes_sub_title") or m["title"]
     category = e.get("category") or "Other"
-    tag = tags.get(e["series_ticker"], "")
+    tag = get_tag(e["series_ticker"])
     db.execute("INSERT OR IGNORE INTO markets VALUES (?,?,?,?,?,?,?,?,NULL)",
                (m["ticker"], e["series_ticker"], e["title"], subtitle, category, tag, m["close_time"], result))
 
 
-def candles(series, ticker, start, end):
+def candles(series, ticker, start, end, minutes=60):
+    # minutes can be 1, 60 or 1440 (one candle per minute, hour or day)
     path = f"/series/{series}/markets/{ticker}/candlesticks"
-    rows = get(path, start_ts=start, end_ts=end, period_interval=60)["candlesticks"]
+    rows = get(path, start_ts=start, end_ts=end, period_interval=minutes)["candlesticks"]
     prices = []
     for c in rows:
         close = c["price"].get("close_dollars")
@@ -184,21 +200,15 @@ def orderbook_depth(ticker):
     return depth
 
 
-def volume_24h(row):
-    event, market = row
-    return float(market["volume_24h_fp"] or 0)
-
-
 def scan():
     # get every open market and keep the most traded ones
-    rows = get_events("open")
+    rows = get_events("open", keep_top=TOP_N)
     rows.sort(key=volume_24h, reverse=True)
     rows = rows[:TOP_N]
-    tags = get_tags()
 
     markets = []
     for e, m in rows:
-        save_market(e, m, tags)
+        save_market(e, m)
         rules = (m.get("rules_primary") or "") + " " + (m.get("rules_secondary") or "")
         markets.append({
             "ticker": m["ticker"],
@@ -206,7 +216,7 @@ def scan():
             "event": e["title"],
             "pick": m.get("yes_sub_title") or m["title"],
             "category": e.get("category") or "Other",
-            "tag": tags.get(e["series_ticker"], ""),
+            "tag": get_tag(e["series_ticker"]),
             "price": price_of(m),
             "prev": float(m["previous_price_dollars"] or 0),
             "volume": float(m["volume_24h_fp"] or 0),

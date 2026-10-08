@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import ai
@@ -21,6 +22,18 @@ app = Flask(__name__)
 app.secret_key = os.environ["SECRET_KEY"]
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"  # so other websites can't submit forms as a logged in user
 ADMIN = os.environ.get("ADMIN_USERNAME", "").lower()
+
+# on render/railway every request comes through their proxy, so without this
+# every visitor looks like the same ip address. only turn it on when deployed,
+# otherwise people could fake their ip with a header
+if os.environ.get("BEHIND_PROXY") == "1":
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
+
+# limits so nobody can spam accounts or burn through the free gemini quota
+SIGNUPS_PER_IP_PER_HOUR = 5
+CHATS_PER_PERSON = 15      # per 10 minutes
+CHATS_PER_IP = 30          # per 10 minutes, so making new guest sessions doesn't reset it
+CHATS_PER_DAY = int(os.environ.get("CHATS_PER_DAY", "300"))  # whole site
 
 REFRESH_SECONDS = 600
 STATE_FILE = "state.json"
@@ -206,6 +219,9 @@ def current_user():
 def signup():
     username = request.form.get("username", "").strip()
     password = request.form.get("password", "")
+    if too_many("signup:" + request.remote_addr, SIGNUPS_PER_IP_PER_HOUR, 3600):
+        flash("Too many new accounts from here, try again later.")
+        return redirect(url_for("home"))
     if not re.fullmatch(r"[A-Za-z0-9_]{3,20}", username):
         flash("Username must be 3-20 letters, numbers or _.")
     elif not 8 <= len(password) <= 128:
@@ -396,9 +412,11 @@ def chat_context():
 def chat():
     who = session.get("user_id") or session.get("guest")
     if not who:
-        return jsonify({"reply": "Pick log in or guest first."}), 403
-    if too_many(f"chat:{who}", 15, 600):
-        return jsonify({"reply": "You've hit the chat limit, try again in a few minutes."}), 429
+        return jsonify({"reply": "Pick log in or guest first.", "sources": []}), 403
+    if too_many(f"chat:{who}", CHATS_PER_PERSON, 600) or too_many("chat-ip:" + request.remote_addr, CHATS_PER_IP, 600):
+        return jsonify({"reply": "You've hit the chat limit, try again in a few minutes.", "sources": []}), 429
+    if too_many("chat-all", CHATS_PER_DAY, 86400):
+        return jsonify({"reply": "The bot is busy today, try again tomorrow.", "sources": []}), 429
 
     data = request.get_json(silent=True) or {}
     message = str(data.get("message", "")).strip()[:500]
@@ -440,8 +458,9 @@ def chat():
 @app.route("/")
 def home():
     user = current_user()
+    page_theme = state.get("theme") or theme.default_theme(0)
     if not user and "guest" not in session:
-        return render_template("welcome.html")
+        return render_template("welcome.html", theme=page_theme)
     tickers = []
     for m in state.get("movers", []):
         tickers.append(m["ticker"])
@@ -453,7 +472,7 @@ def home():
                            comments=comments, updated=state.get("updated"), brief=state.get("brief"),
                            movers=state.get("movers", []), edges=state.get("edges", []),
                            score=state.get("score", {}), table=state.get("table", []),
-                           theme=state.get("theme") or theme.default_theme(0))
+                           theme=page_theme)
 
 
 @app.route("/live")
@@ -467,6 +486,30 @@ def live_data():
     bets = big_bets(db)
     db.close()
     return jsonify({"prices": prices, "bets": bets, "updated": state.get("updated"), "brief": state.get("brief")})
+
+
+# how far back each chart button goes, and how big each candle is
+RANGES = {"day": (86400, 60), "week": (7 * 86400, 60), "month": (30 * 86400, 1440)}
+
+
+@app.route("/history/<ticker>")
+def history(ticker):
+    # only allow markets that are on the page, so people can't use us to hit kalshi for anything
+    series = None
+    for m in state.get("movers", []) + state.get("edges", []):
+        if m["ticker"] == ticker:
+            series = m["series"]
+    if series is None:
+        return jsonify({"error": "That market isn't on the page anymore."}), 404
+    if too_many("history:" + request.remote_addr, 60, 600):
+        return jsonify({"error": "Too many charts, wait a few minutes."}), 429
+
+    seconds, minutes = RANGES.get(request.args.get("range"), RANGES["day"])
+    now = int(time.time())
+    points = []
+    for ts, price in collect.candles(series, ticker, now - seconds, now, minutes):
+        points.append({"t": ts, "price": price})
+    return jsonify({"points": points})
 
 
 @app.route("/health")

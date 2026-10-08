@@ -71,7 +71,8 @@ def calibration_table(cal):
         if b in cal.overall:
             yes, n = cal.overall[b]
             label = str(b * 10) + "-" + str(b * 10 + 10) + "%"
-            rows.append((label, yes / n, n))
+            middle = b / 10 + 0.05  # for the chart, 0.05 is the middle of the 0-10% bucket
+            rows.append((label, yes / n, n, middle))
     return rows
 
 
