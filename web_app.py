@@ -7,7 +7,6 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
-from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import psycopg
@@ -26,11 +25,7 @@ app.secret_key = os.environ["SECRET_KEY"]
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"  # so other websites can't submit forms as a logged in user
 ADMIN = os.environ.get("ADMIN_USERNAME", "").lower()
 
-# on render/railway every request comes through their proxy, so without this
-# every visitor looks like the same ip address. only turn it on when deployed,
-# otherwise people could fake their ip with a header
-if os.environ.get("BEHIND_PROXY") == "1":
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
+BEHIND_PROXY = os.environ.get("BEHIND_PROXY") == "1"
 
 # limits so nobody can spam accounts or burn through the free gemini quota
 SIGNUPS_PER_IP_PER_HOUR = 5
@@ -189,6 +184,15 @@ def refresh_forever():
         time.sleep(REFRESH_SECONDS)
 
 
+def client_ip():
+    # on render every request goes through cloudflare and render's load balancer first,
+    # so request.remote_addr is one of render's machines, not the visitor.
+    # cloudflare puts the real visitor ip in this header (and overwrites it if someone tries to fake it)
+    if BEHIND_PROXY:
+        return request.headers.get("Cf-Connecting-Ip") or request.remote_addr
+    return request.remote_addr
+
+
 # simple rate limiting: remember when each person did something
 hits = {}
 
@@ -221,7 +225,7 @@ def current_user():
 def signup():
     username = request.form.get("username", "").strip()
     password = request.form.get("password", "")
-    if too_many("signup:" + request.remote_addr, SIGNUPS_PER_IP_PER_HOUR, 3600):
+    if too_many("signup:" + client_ip(), SIGNUPS_PER_IP_PER_HOUR, 3600):
         flash("Too many new accounts from here, try again later.")
         return redirect(url_for("home"))
     if not re.fullmatch(r"[A-Za-z0-9_]{3,20}", username):
@@ -245,7 +249,7 @@ def signup():
 @app.route("/login", methods=["POST"])
 def login():
     username = request.form.get("username", "").strip()
-    if too_many(f"login:{request.remote_addr}", 10, 600):
+    if too_many("login:" + client_ip(), 10, 600):
         flash("Too many tries, wait a few minutes.")
         return redirect(url_for("home"))
     rows = db.query("SELECT id, password_hash FROM users WHERE lower(username) = lower(%s)", (username,))
@@ -399,7 +403,7 @@ def chat():
     who = session.get("user_id") or session.get("guest")
     if not who:
         return jsonify({"reply": "Pick log in or guest first.", "sources": []}), 403
-    if too_many(f"chat:{who}", CHATS_PER_PERSON, 600) or too_many("chat-ip:" + request.remote_addr, CHATS_PER_IP, 600):
+    if too_many(f"chat:{who}", CHATS_PER_PERSON, 600) or too_many("chat-ip:" + client_ip(), CHATS_PER_IP, 600):
         return jsonify({"reply": "You've hit the chat limit, try again in a few minutes.", "sources": []}), 429
     if too_many("chat-all", CHATS_PER_DAY, 86400):
         return jsonify({"reply": "The bot is busy today, try again tomorrow.", "sources": []}), 429
@@ -490,7 +494,7 @@ def history(ticker):
             series = m["series"]
     if series is None:
         return jsonify({"error": "That market isn't on the page anymore."}), 404
-    if too_many("history:" + request.remote_addr, 60, 600):
+    if too_many("history:" + client_ip(), 60, 600):
         return jsonify({"error": "Too many charts, wait a few minutes."}), 429
 
     seconds, minutes = RANGES.get(request.args.get("range"), RANGES["day"])
@@ -499,16 +503,6 @@ def history(ticker):
     for ts, price in collect.candles(series, ticker, now - seconds, now, minutes):
         points.append({"t": ts, "price": price})
     return jsonify({"points": points})
-
-
-@app.route("/whoami")
-def whoami():
-    # temporary: shows which ip headers render passes along, so the rate limits use the real visitor ip
-    return jsonify({"remote_addr": request.remote_addr,
-                    "x_forwarded_for": request.headers.get("X-Forwarded-For"),
-                    "true_client_ip": request.headers.get("True-Client-Ip"),
-                    "cf_connecting_ip": request.headers.get("Cf-Connecting-Ip"),
-                    "x_real_ip": request.headers.get("X-Real-Ip")})
 
 
 @app.route("/health")
