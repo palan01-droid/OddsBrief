@@ -1,5 +1,9 @@
+import os
+
 # settings for gunicorn, the server that runs the app on render
-# (only 1 worker, because the live prices and the background threads live in memory)
+# render tells us which port to use in $PORT
+bind = "0.0.0.0:" + os.environ.get("PORT", "8000")
+# only 1 worker, because the live prices and the background threads live in memory
 workers = 1
 threads = 8
 timeout = 120
