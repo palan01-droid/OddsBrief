@@ -2,7 +2,6 @@ import json
 import os
 import re
 import secrets
-import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -11,8 +10,12 @@ from flask import Flask, flash, jsonify, redirect, render_template, request, ses
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
+import psycopg
+
 import ai
+import backfill
 import collect
+import db
 import learn
 import live
 import rag
@@ -36,14 +39,13 @@ CHATS_PER_IP = 30          # per 10 minutes, so making new guest sessions doesn'
 CHATS_PER_DAY = int(os.environ.get("CHATS_PER_DAY", "300"))  # whole site
 
 REFRESH_SECONDS = 600
-STATE_FILE = "state.json"
 
-# load the page from last time so it shows up right away instead of waiting for a scan
-try:
-    with open(STATE_FILE) as f:
-        state = json.load(f)
-except FileNotFoundError:
-    state = {}
+# load the page from last time so it shows up right away instead of waiting for a scan.
+# it's saved in the database because the free server forgets its files when it restarts
+state = {}
+saved = db.query("SELECT value FROM app_state WHERE name = 'page'")
+if saved:
+    state = json.loads(saved[0][0])
 
 
 def sparkline(series, ticker):
@@ -72,12 +74,12 @@ def sparkline(series, ticker):
     return " ".join(points)
 
 
-def big_bets(db):
+def big_bets():
     since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-    rows = db.execute("""
+    rows = db.query("""
         SELECT title, side, price, dollars, time FROM trades
-        WHERE time > ? ORDER BY dollars DESC LIMIT 10
-    """, (since,)).fetchall()
+        WHERE time > %s ORDER BY dollars DESC LIMIT 10
+    """, (since,))
     bets = []
     for title, side, price, dollars, when in rows:
         bets.append({"title": title, "side": side, "price": price, "dollars": dollars, "time": when[11:16]})
@@ -122,8 +124,7 @@ def refresh():
     markets = collect.scan()
     collect.resolve()
 
-    db = sqlite3.connect(collect.DB)
-    cal, score = learn.train(db)
+    cal, score = learn.train()
 
     # skip markets that are basically decided already (under 5% or over 95%)
     in_play = []
@@ -146,8 +147,7 @@ def refresh():
                     edges.append(m)
         edges.sort(key=lambda m: abs(m["model"] - m["price"]), reverse=True)
 
-    bets = big_bets(db)
-    db.close()
+    bets = big_bets()
 
     state["updated"] = datetime.now().strftime("%-I:%M %p")
     state["movers"] = movers
@@ -160,19 +160,26 @@ def refresh():
 
     # writing the brief takes a few seconds, so the page updates first and the brief shows up after
     state["brief"] = write_brief(movers, bets)
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
+    db.run("""INSERT INTO app_state (name, value) VALUES ('page', %s)
+              ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value""", (json.dumps(state),))
 
     # save new market rules and this brief for the chatbot to search later
     try:
         added = rag.add_rules(markets)
         rag.add_brief(datetime.now().strftime("%b %-d, %-I:%M %p"), state["brief"], movers)
-        print(f"rag: added {added} market rules, {rag.docs.count()} documents total")
+        print(f"rag: added {added} market rules, {rag.count()} documents total")
     except Exception as e:
         print("rag update failed:", e)
 
 
 def refresh_forever():
+    # brand new database (like the first deploy)? fill it with past markets so the model can learn right away
+    try:
+        if db.query("SELECT COUNT(*) FROM markets WHERE forecast >= 0")[0][0] < 100:
+            backfill.backfill(pages=5)
+    except Exception as e:
+        print("backfill failed:", e)
+
     while True:
         try:
             refresh()
@@ -200,19 +207,14 @@ def too_many(key, limit, seconds):
     return False
 
 
-def get_db():
-    return sqlite3.connect(collect.DB)
-
-
 def current_user():
     if "user_id" not in session:
         return None
-    db = get_db()
-    row = db.execute("SELECT id, username FROM users WHERE id=?", (session["user_id"],)).fetchone()
-    db.close()
-    if row is None:
+    rows = db.query("SELECT id, username FROM users WHERE id = %s", (session["user_id"],))
+    if len(rows) == 0:
         return None
-    return {"id": row[0], "username": row[1], "admin": row[1].lower() == ADMIN}
+    user_id, username = rows[0]
+    return {"id": user_id, "username": username, "admin": username.lower() == ADMIN}
 
 
 @app.route("/signup", methods=["POST"])
@@ -227,19 +229,16 @@ def signup():
     elif not 8 <= len(password) <= 128:
         flash("Password must be at least 8 characters.")
     else:
-        db = get_db()
         try:
             # never save the real password, only a hash of it
             password_hash = generate_password_hash(password)
             created = datetime.now(timezone.utc).isoformat()
-            cur = db.execute("INSERT INTO users (username, password_hash, created) VALUES (?,?,?)",
-                             (username, password_hash, created))
-            db.commit()
+            rows = db.query("INSERT INTO users (username, password_hash, created) VALUES (%s, %s, %s) RETURNING id",
+                            (username, password_hash, created))
             session.clear()
-            session["user_id"] = cur.lastrowid
-        except sqlite3.IntegrityError:  # username is UNIQUE in the table
+            session["user_id"] = rows[0][0]
+        except psycopg.IntegrityError:  # usernames are unique (ignoring upper/lower case)
             flash("That username is taken.")
-        db.close()
     return redirect(url_for("home"))
 
 
@@ -249,12 +248,10 @@ def login():
     if too_many(f"login:{request.remote_addr}", 10, 600):
         flash("Too many tries, wait a few minutes.")
         return redirect(url_for("home"))
-    db = get_db()
-    row = db.execute("SELECT id, password_hash FROM users WHERE username=?", (username,)).fetchone()
-    db.close()
-    if row and check_password_hash(row[1], request.form.get("password", "")):
+    rows = db.query("SELECT id, password_hash FROM users WHERE lower(username) = lower(%s)", (username,))
+    if rows and check_password_hash(rows[0][1], request.form.get("password", "")):
         session.clear()
-        session["user_id"] = row[0]
+        session["user_id"] = rows[0][0]
     else:
         flash("Wrong username or password.")
     return redirect(url_for("home"))
@@ -279,13 +276,10 @@ def like(ticker):
     if not user:
         flash("Make an account to like markets.")
         return redirect(url_for("home"))
-    db = get_db()
     # clicking like again removes the like
-    removed = db.execute("DELETE FROM likes WHERE user_id=? AND ticker=?", (user["id"], ticker)).rowcount
+    removed = db.run("DELETE FROM likes WHERE user_id = %s AND ticker = %s", (user["id"], ticker))
     if removed == 0:
-        db.execute("INSERT INTO likes VALUES (?,?)", (user["id"], ticker))
-    db.commit()
-    db.close()
+        db.run("INSERT INTO likes VALUES (%s, %s) ON CONFLICT DO NOTHING", (user["id"], ticker))
     return redirect(url_for("home") + "#" + ticker)
 
 
@@ -300,19 +294,20 @@ def comment(ticker):
     elif too_many(f"comment:{user['id']}", 5, 60):
         flash("Slow down a little.")
     else:
-        db = get_db()
         now = datetime.now(timezone.utc).isoformat()
-        cur = db.execute("INSERT INTO comments (user_id, ticker, text, time) VALUES (?,?,?,?)",
-                         (user["id"], ticker, text, now))
-        db.commit()
-        db.close()
+        rows = db.query("INSERT INTO comments (user_id, ticker, text, time) VALUES (%s, %s, %s, %s) RETURNING id",
+                        (user["id"], ticker, text, now))
+        comment_id = rows[0][0]
 
         # also save it for the chatbot to search
         market = ticker
         for m in state.get("movers", []):
             if m["ticker"] == ticker:
                 market = m["event"] + " - " + m["pick"]
-        rag.add_comment(cur.lastrowid, user["username"], market, text)
+        try:
+            rag.add_comment(comment_id, user["username"], market, text)
+        except Exception as e:
+            print("rag: couldn't save comment:", e)
     return redirect(url_for("home") + "#" + ticker)
 
 
@@ -320,14 +315,11 @@ def comment(ticker):
 def delete_comment(comment_id):
     user = current_user()
     if user:
-        db = get_db()
         # admins can delete any comment, everyone else only their own
         if user["admin"]:
-            deleted = db.execute("DELETE FROM comments WHERE id=?", (comment_id,)).rowcount
+            deleted = db.run("DELETE FROM comments WHERE id = %s", (comment_id,))
         else:
-            deleted = db.execute("DELETE FROM comments WHERE id=? AND user_id=?", (comment_id, user["id"])).rowcount
-        db.commit()
-        db.close()
+            deleted = db.run("DELETE FROM comments WHERE id = %s AND user_id = %s", (comment_id, user["id"]))
         if deleted:
             rag.delete_comment(comment_id)
     return redirect(request.referrer or url_for("home"))
@@ -335,32 +327,28 @@ def delete_comment(comment_id):
 
 def social(tickers, user):
     # like counts, which ones this user liked, and the comments, for the cards on the page
-    db = get_db()
-    marks = ",".join(["?"] * len(tickers))  # "?,?,?" one for each ticker
-
     likes = {}
-    for ticker, count in db.execute(f"SELECT ticker, COUNT(*) FROM likes WHERE ticker IN ({marks}) GROUP BY ticker", tickers):
+    for ticker, count in db.query("SELECT ticker, COUNT(*) FROM likes WHERE ticker = ANY(%s) GROUP BY ticker", (tickers,)):
         likes[ticker] = count
 
     mine = []
     if user:
-        for row in db.execute("SELECT ticker FROM likes WHERE user_id=?", (user["id"],)):
+        for row in db.query("SELECT ticker FROM likes WHERE user_id = %s", (user["id"],)):
             mine.append(row[0])
 
     comments = {}
     for ticker in tickers:
         comments[ticker] = []
-    rows = db.execute(f"""
+    rows = db.query("""
         SELECT c.id, c.ticker, c.text, c.time, u.id, u.username FROM comments c JOIN users u ON u.id = c.user_id
-        WHERE c.ticker IN ({marks}) ORDER BY c.time
-    """, tickers)
+        WHERE c.ticker = ANY(%s) ORDER BY c.time
+    """, (tickers,))
     for comment_id, ticker, text, when, user_id, username in rows:
         can_delete = False
         if user and (user["admin"] or user["id"] == user_id):
             can_delete = True
         comments[ticker].append({"id": comment_id, "text": text, "time": when[:16].replace("T", " "),
                                  "user": username, "can_delete": can_delete})
-    db.close()
     return likes, mine, comments
 
 
@@ -400,10 +388,8 @@ def chat_context():
     score = state.get("score", {})
     if score.get("n"):
         lines.append(f"Model score: {score['n']} resolved markets, market Brier {score['market']:.4f}, model {score['model']:.4f}")
-    db = get_db()
-    for b in big_bets(db)[:5]:
+    for b in big_bets()[:5]:
         lines.append(f"Big bet: ${b['dollars']:,.0f} on {b['side'].upper()} at {b['price']:.0%} in {b['title']}")
-    db.close()
     lines.append(f"Today's brief: {state.get('brief', '')}")
     return "\n".join(lines)
 
@@ -434,7 +420,12 @@ def chat():
     prompt += "User: " + message + "\nBot:"
 
     # RAG: find the most relevant rules/briefs/comments and give them to the AI as numbered sources
-    hits = rag.search(message)
+    try:
+        hits = rag.search(message)
+    except Exception as e:
+        # search not working right now (like gemini's rate limit), answer without sources
+        print("rag search failed:", e)
+        hits = []
     sources = ""
     for i in range(len(hits)):
         sources += f"[{i + 1}] {hits[i]['text']}\n\n"
@@ -482,9 +473,7 @@ def live_data():
     for ticker in request.args.get("tickers", "").split(","):
         if ticker in live.prices:
             prices[ticker] = live.prices[ticker]
-    db = get_db()
-    bets = big_bets(db)
-    db.close()
+    bets = big_bets()
     return jsonify({"prices": prices, "bets": bets, "updated": state.get("updated"), "brief": state.get("brief")})
 
 
@@ -517,8 +506,13 @@ def health():
     return "ok"
 
 
-if __name__ == "__main__":
+def start_background():
     # one thread listens to the websocket, one rescans every 10 minutes, flask serves the page
     threading.Thread(target=live.run_forever, daemon=True).start()
     threading.Thread(target=refresh_forever, daemon=True).start()
+
+
+# locally: python web_app.py   (on render, gunicorn starts it, see gunicorn.conf.py)
+if __name__ == "__main__":
+    start_background()
     app.run(port=5050)

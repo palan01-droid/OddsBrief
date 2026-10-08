@@ -1,44 +1,13 @@
-import os
-import sqlite3
 import time
 from datetime import datetime
 
 import requests
 
+import db
+
 API = "https://external-api.kalshi.com/trade-api/v2"
-DB = "oddsbrief.db"
 TOP_N = 500
 BIG_BET = 5000
-
-# load settings from .env (on the server these are already environment variables)
-if os.path.exists(".env"):
-    with open(".env") as f:
-        for line in f:
-            line = line.strip()
-            if "=" in line:
-                name, value = line.split("=", 1)
-                if name not in os.environ:
-                    os.environ[name] = value
-
-db = sqlite3.connect(DB, check_same_thread=False)
-db.executescript("""
-CREATE TABLE IF NOT EXISTS markets (
-    ticker TEXT PRIMARY KEY, series TEXT, event_title TEXT, subtitle TEXT,
-    category TEXT, tag TEXT, close_time TEXT, result TEXT, forecast REAL
-);
-CREATE TABLE IF NOT EXISTS trades (
-    trade_id TEXT PRIMARY KEY, ticker TEXT, title TEXT, time TEXT, side TEXT, price REAL, dollars REAL
-);
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY, username TEXT UNIQUE COLLATE NOCASE, password_hash TEXT, created TEXT
-);
-CREATE TABLE IF NOT EXISTS likes (
-    user_id INTEGER, ticker TEXT, PRIMARY KEY (user_id, ticker)
-);
-CREATE TABLE IF NOT EXISTS comments (
-    id INTEGER PRIMARY KEY, user_id INTEGER, ticker TEXT, text TEXT, time TEXT
-);
-""")
 
 
 def get(path, **params):
@@ -116,12 +85,16 @@ def get_tag(series_ticker):
     return tags[series_ticker]
 
 
-def save_market(e, m, result=None):
+def market_row(e, m, result=None):
+    # one row for the markets table
     subtitle = m.get("yes_sub_title") or m["title"]
     category = e.get("category") or "Other"
     tag = get_tag(e["series_ticker"])
-    db.execute("INSERT OR IGNORE INTO markets VALUES (?,?,?,?,?,?,?,?,NULL)",
-               (m["ticker"], e["series_ticker"], e["title"], subtitle, category, tag, m["close_time"], result))
+    return (m["ticker"], e["series_ticker"], e["title"], subtitle, category, tag, m["close_time"], result)
+
+
+def save_markets(rows):
+    db.run_many("INSERT INTO markets VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NULL) ON CONFLICT DO NOTHING", rows)
 
 
 def candles(series, ticker, start, end, minutes=60):
@@ -156,30 +129,29 @@ def forecast_for(series, ticker, close_time):
 
 
 def fill_forecasts():
-    todo = db.execute(
-        "SELECT ticker, series, close_time FROM markets WHERE result IS NOT NULL AND forecast IS NULL"
-    ).fetchall()
+    todo = db.query("SELECT ticker, series, close_time FROM markets WHERE result IS NOT NULL AND forecast IS NULL")
+    updates = []
     for ticker, series, close_time in todo:
         forecast = forecast_for(series, ticker, close_time)
         if forecast is None:
             forecast = -1  # no price history, learn.py skips these
-        db.execute("UPDATE markets SET forecast=? WHERE ticker=?", (forecast, ticker))
-    db.commit()
+        updates.append((forecast, ticker))
+    db.run_many("UPDATE markets SET forecast=%s WHERE ticker=%s", updates)
 
 
 def resolve():
     # check which of our markets have finished
     pending = []
-    for row in db.execute("SELECT ticker FROM markets WHERE result IS NULL"):
+    for row in db.query("SELECT ticker FROM markets WHERE result IS NULL"):
         pending.append(row[0])
     # kalshi lets you ask about 100 tickers at once
+    updates = []
     for i in range(0, len(pending), 100):
         batch = ",".join(pending[i:i + 100])
         for m in get("/markets", tickers=batch)["markets"]:
             if m["result"] in ("yes", "no"):
-                db.execute("UPDATE markets SET result=?, close_time=? WHERE ticker=?",
-                           (m["result"], m["close_time"], m["ticker"]))
-    db.commit()
+                updates.append((m["result"], m["close_time"], m["ticker"]))
+    db.run_many("UPDATE markets SET result=%s, close_time=%s WHERE ticker=%s", updates)
     fill_forecasts()
 
 
@@ -207,8 +179,9 @@ def scan():
     rows = rows[:TOP_N]
 
     markets = []
+    new_rows = []
     for e, m in rows:
-        save_market(e, m)
+        new_rows.append(market_row(e, m))
         rules = (m.get("rules_primary") or "") + " " + (m.get("rules_secondary") or "")
         markets.append({
             "ticker": m["ticker"],
@@ -222,7 +195,7 @@ def scan():
             "volume": float(m["volume_24h_fp"] or 0),
             "rules": rules.strip(),
         })
-    db.commit()
+    save_markets(new_rows)
     return markets
 
 

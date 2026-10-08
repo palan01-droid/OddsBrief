@@ -1,3 +1,5 @@
+import db
+
 # the model starts by trusting the market, like it already saw 20 results at the market's price.
 # the more real results it sees, the more it trusts its own numbers instead
 PRIOR = 20
@@ -41,12 +43,12 @@ class Calibrator:
         total[1] += 1
 
 
-def train(db):
-    rows = db.execute("""
+def train():
+    rows = db.query("""
         SELECT category, forecast, result = 'yes' FROM markets
         WHERE result IS NOT NULL AND forecast >= 0
         ORDER BY close_time
-    """).fetchall()
+    """)
 
     # score each market before learning from it, so the model never sees the answer first
     cal = Calibrator()

@@ -2,14 +2,14 @@ import asyncio
 import base64
 import json
 import os
-import sqlite3
 import time
 from datetime import datetime, timezone
 
 import websockets
 from cryptography.hazmat.primitives import serialization
 
-from collect import DB, BIG_BET, get, price_of
+import db
+from collect import BIG_BET, get, price_of
 
 WS_HOST = "wss://external-api-ws.kalshi.com"
 WS_PATH = "/trade-api/ws/v2"
@@ -50,7 +50,7 @@ def title_for(ticker):
     return title
 
 
-def save_trade(db, t):
+def save_trade(t):
     side = t["taker_side"]
     price = float(t[side + "_price_dollars"])
     dollars = float(t["count_fp"]) * price
@@ -64,13 +64,15 @@ def save_trade(db, t):
         return
     when = datetime.fromtimestamp(t["ts"], timezone.utc).isoformat()
     title = title_for(t["market_ticker"])
-    db.execute("INSERT OR IGNORE INTO trades VALUES (?,?,?,?,?,?,?)",
+    try:
+        db.run("INSERT INTO trades VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                (t["trade_id"], t["market_ticker"], title, when, side, price, round(dollars, 2)))
-    db.commit()
+    except Exception as e:
+        # a database hiccup shouldn't kill the websocket, just skip this one
+        print("live: couldn't save trade:", type(e).__name__)
 
 
 async def listen():
-    db = sqlite3.connect(DB)
     async with websockets.connect(WS_HOST + WS_PATH, additional_headers=auth_headers()) as ws:
         # not giving a list of markets means we get every market on kalshi
         subscribe = {"id": 1, "cmd": "subscribe", "params": {"channels": ["ticker", "trade"]}}
@@ -83,7 +85,7 @@ async def listen():
                 data["last_price_dollars"] = data["price_dollars"]
                 prices[data["market_ticker"]] = price_of(data)
             elif msg["type"] == "trade":
-                save_trade(db, data)
+                save_trade(data)
 
 
 def run_forever():
